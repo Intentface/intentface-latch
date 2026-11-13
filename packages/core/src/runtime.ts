@@ -1,5 +1,7 @@
 import {
+  JsonToSseTransformStream,
   ToolLoopAgent,
+  UI_MESSAGE_STREAM_HEADERS,
   consumeStream,
   createIdGenerator,
   createUIMessageStream,
@@ -14,6 +16,7 @@ import {
 import type { Experimental_SandboxSession, Instructions, LanguageModel, ToolSet } from "ai";
 import { acceptUserMessage, contextData, contextOf, InvalidMessageError, isHidden, isHeldSignal, isSignal, lastQuestionResent, latestMessageContext, type AppMessage, type SignalMark, type Visibility } from "./message.js";
 import type { ReconstructPrincipal } from "./principal.js";
+import type { LiveStreams } from "./live-stream.js";
 import { toContextDefinition, type ContextInput, type ToolContext } from "./context.js";
 import type {
   AgentConfig,
@@ -435,6 +438,15 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    * open response is the only thing that keeps every host alive.
    */
   waitUntil?: (work: Promise<unknown>) => void;
+  /**
+   * Where a running answer's stream is kept so a request other than the one
+   * that started it can read it: a reloaded page, or a page whose chat got an
+   * answer it didn't ask for (a held message, a signal, a schedule). Read
+   * with `streamChat`. `memoryLiveStreams()` for one long-running server; a
+   * shared store (Redis) where requests land on different instances. Without
+   * it, such a page polls (`pollChat`).
+   */
+  liveStreams?: LiveStreams;
   /**
    * Observes runs: tracing, per-step and per-run callbacks. Use
    * `@intentface/latch-otel` for full tracing, or only the callbacks you
@@ -899,6 +911,13 @@ export interface Runtime<P> {
    * the principal's.
    */
   pollChat(input: { chatId: string; principal: P; cursor?: string }): Promise<ChatPoll | null>;
+  /**
+   * The stream of the answer running in a chat, from its start, as the
+   * `Response` `useChat` reads when it resumes. `null` when no answer is
+   * running, its stream can't be reached, the chat isn't the principal's, or
+   * the runtime has no `liveStreams`.
+   */
+  streamChat(input: { chatId: string; principal: P }): Promise<Response | null>;
   /**
    * A chat's messages for showing to the user, with internal messages left
    * out. Use it to render a conversation when the page loads.
@@ -3439,6 +3458,19 @@ export function createRuntime<P, RC = unknown>(
     // the full message (the model's abort is tied to the lease, not the
     // request, so a disconnect doesn't cancel generation).
     let out = stream as ReadableStream<unknown>;
+    if (config.liveStreams) {
+      // A copy for whoever isn't on this request. Taken before the stream is
+      // held open for held inputs below: this one ends with the answer.
+      const [main, copy] = out.tee();
+      out = main;
+      await config.liveStreams
+        .publish(liveStreamId(args.run.id, args.lease), copy.pipeThrough(new JsonToSseTransformStream() as unknown as TransformStream<unknown, string>))
+        .catch((e) => {
+          // The answer goes on without it; pages fall back to polling.
+          console.error(`[live] couldn't publish the stream of run ${args.run.id}:`, e);
+          void copy.cancel().catch(() => {});
+        });
+    }
     if (args.drain !== false && queueOn && config.waitUntil) {
       // Held inputs get their turn once this run is settled, after the response.
       config.waitUntil(settled.then(() => startHeld(resolvedChatId, principal)));
@@ -5344,6 +5376,27 @@ export function createRuntime<P, RC = unknown>(
   }
 
   /**
+   * One id per stream: a run recovered after a crash streams again, under
+   * the lease it was recovered with.
+   */
+  function liveStreamId(runId: string, lease?: { fencingToken?: number | null } | null): string {
+    return `${runId}:${lease?.fencingToken ?? 0}`;
+  }
+
+  async function streamChat({ chatId, principal }: { chatId: string; principal: P }): Promise<Response | null> {
+    if (!config.liveStreams || !(await storage.getChat(principal, chatId))) return null;
+    const runs = await storage.listRuns(principal, { limit: 20, chatId });
+    const run = runs.find((r) => r.chatId === chatId && r.status === "active");
+    if (!run) return null;
+    const stream = await config.liveStreams.subscribe(liveStreamId(run.id, run)).catch((e) => {
+      console.error(`[live] couldn't read the stream of run ${run.id}:`, e);
+      return null;
+    });
+    if (!stream) return null;
+    return new Response(stream.pipeThrough(new TextEncoderStream()), { headers: UI_MESSAGE_STREAM_HEADERS });
+  }
+
+  /**
    * Resume a subagent thread after its bubbled-up approval was decided: apply
    * the decision to the sub's gated tool, re-run the sub from history (the
    * approved tool executes, or returns denied), and return the sub's digest.
@@ -5747,6 +5800,7 @@ export function createRuntime<P, RC = unknown>(
     listQueued,
     cancelQueued,
     pollChat,
+    streamChat,
     loadHistory,
     listChats,
     getChat: getChatById,

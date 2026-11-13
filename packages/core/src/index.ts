@@ -8,6 +8,7 @@
 export * from "./principal.js";
 export * from "./message.js";
 export * from "./storage.js";
+export * from "./live-stream.js";
 export * from "./context.js";
 export { toolFor, type LatchToolContext, type ToolFactory } from "./tool-for.js";
 export * from "./current-date.js";

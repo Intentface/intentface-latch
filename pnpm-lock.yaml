@@ -221,6 +221,9 @@ importers:
       ai:
         specifier: ^7.0.106
         version: 7.0.106(zod@4.6.5)
+      resumable-stream:
+        specifier: ^2.2.13
+        version: 2.2.13
       turndown:
         specifier: ^7.2.4
         version: 7.2.4
@@ -1048,6 +1051,7 @@ packages:
 
   '@intentface/chat@0.5.2':
     resolution: {integrity: sha512-CiIqFkelzM0i3IN0sKx8Cp8avPA63ZPvd6hSdW+54AJF1RyAV84HyKu6PAcMmy/LDhgDjYIYapLSGPlAegrt4Q==}
+    deprecated: Renamed to @intentface/ui. Replace @intentface/chat/ with @intentface/ui/ in your imports.
     peerDependencies:
       react: ^19.0.0
       react-dom: ^19.0.0
@@ -1301,6 +1305,7 @@ packages:
   '@opentelemetry/sdk-trace-base@2.12.0':
     resolution: {integrity: sha512-JOERgZCxRM06FEJ5kEWxlSRChah6MmXDx3KwCruqEv/iEyLkTokCSemf2y1w8oIHtfrr8EVTpzebq/31vn2Cpg==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
@@ -3949,6 +3954,9 @@ packages:
 
   reselect@5.2.0:
     resolution: {integrity: sha512-AgZ3UOZm3YndfrJ4OYjgrT7bmCm/1iqkjvEfH/oYjzh6PD2qw4QuT3jjnXIrpdt4MTpMXclMT3lXbmRY+XRakw==}
+
+  resumable-stream@2.2.13:
+    resolution: {integrity: sha512-qy1ZZUP7sFKGXSx7OdbjU3f07VfSM7CghOlUaKT+35AuADX0sAYndmeCb5kVwgi4MSfkZZiL4yrdxWX1xx/Lnw==}
 
   rolldown@1.0.3:
     resolution: {integrity: sha512-i00lAJ2ks1BYr7rjNjKC7BcqAS7nVfiT3QX1SI5aY+AFHblCmaUf9OE9dbdzDvW6dJxbi2ZCZiy9v3CcwOiX3g==}
@@ -8110,6 +8118,8 @@ snapshots:
   require-from-string@2.0.2: {}
 
   reselect@5.2.0: {}
+
+  resumable-stream@2.2.13: {}
 
   rolldown@1.0.3:
     dependencies:

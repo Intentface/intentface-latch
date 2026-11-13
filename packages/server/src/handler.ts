@@ -617,6 +617,16 @@ export function createLatchHandler<P>(
       return poll ? json(poll) : json({ error: "not found" }, 404);
     }
 
+    // GET chats/:id/stream: the stream of the answer running in the chat,
+    // from its start (what `useChat` asks for when it resumes). 204 when
+    // nothing is running or the runtime keeps no live streams.
+    if (seg[0] === "chats" && seg[1] && seg[2] === "stream" && method === "GET") {
+      const principal = await resolvePrincipal(request);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      const rt = await resolveRuntime(principal);
+      return (await rt.streamChat({ chatId: seg[1], principal })) ?? new Response(null, { status: 204 });
+    }
+
     // DELETE chats/:id/queue/:messageId: take back a message that is still
     // waiting. Only one the caller can see waiting; 404 once its turn started.
     if (seg[0] === "chats" && seg[1] && seg[2] === "queue" && seg[3] && method === "DELETE") {
