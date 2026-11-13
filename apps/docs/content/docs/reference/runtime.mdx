@@ -82,6 +82,22 @@ if (poll?.messages) render(poll.messages); // absent when nothing changed since 
 
 <auto-type-table path="../../../../../packages/core/src/runtime.ts" name="ChatPoll" />
 
+## watchChat, streamChat
+
+Experimental. For a page that didn't start the answer it should show: a second tab, a reloaded page, the answer to a signal or a held message. Both need `liveStreams` on the runtime; see [live updates](/docs/guides/live-updates).
+
+```ts
+// One long-lived connection per open chat: server-sent `ChatEvent`s.
+const events = await runtime.watchChat({ chatId, principal }); // Response | null
+
+// The running answer from its start, as `useChat` reads it when it resumes.
+const stream = await runtime.streamChat({ chatId, principal }); // Response | null
+```
+
+`watchChat` returns `null` when the chat isn't the principal's or `liveStreams` can't notify. `streamChat` returns `null` when no answer is running.
+
+<auto-type-table path="../../../../../packages/core/src/live-stream.ts" name="LiveStreams" />
+
 ## applyApproval
 
 Continues a run that paused on a tool needing approval. Decisions that are no longer pending (a double click, an old tab) are ignored, so it is safe to call more than once.

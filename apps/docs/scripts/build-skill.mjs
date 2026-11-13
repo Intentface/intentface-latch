@@ -33,6 +33,7 @@ const PAGES = [
   "guides/approvals",
   "guides/signals",
   "guides/queue",
+  "guides/live-updates",
   "guides/schedules",
   "guides/connections",
   "guides/channels",

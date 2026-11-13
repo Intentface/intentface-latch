@@ -174,65 +174,89 @@ async function main() {
   await first;
   assert(tab1.text().join(" | ") === "user: hi | assistant: Hello.", `tab 1 got its answer (${tab1.text().join(" | ")})`);
 
-  // Tab 2 opens the chat on the other instance: history, then it watches.
-  const history = (await (await b.fetchFrom(`http://latch.test/api/chats/${chatId}/poll`)).json()) as { messages: UIMessage[] };
-  tab2.messages = history.messages;
-  const seen: ChatEvent[] = [];
-  const stop = new AbortController();
-  const events = await b.fetchFrom(`http://latch.test/api/chats/${chatId}/events`, { signal: stop.signal });
-  assert(events.status === 200, `events route answers 200 (got ${events.status})`);
-  let reading: Promise<void> = Promise.resolve();
-  void (async () => {
-    const reader = events.body!.pipeThrough(new TextDecoderStream()).getReader();
-    for (;;) {
-      const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
-      if (done || !value) return;
-      for (const line of value.split("\n\n")) {
-        if (!line.startsWith("data: ")) continue;
-        const event = JSON.parse(line.slice(6)) as ChatEvent;
-        seen.push(event);
-        // What a page does. An answer started: take the history (the message
-        // that started it may have come from elsewhere), then read the
-        // answer. Anything else: the history, once no answer is being read.
-        const refresh = async () => {
-          const poll = (await (await b.fetchFrom(`http://latch.test/api/chats/${chatId}/poll`)).json()) as { messages: UIMessage[] };
-          tab2.messages = poll.messages;
-        };
-        if (event.type === "started") reading = reading.then(refresh).then(() => tab2.resumeStream());
-        else reading = reading.then(refresh);
+  // What a page does with the chat's events, for every tab below.
+  const watch = async (tab: Tab, fetchFrom: typeof fetch) => {
+    const seen: ChatEvent[] = [];
+    const stop = new AbortController();
+    const events = await fetchFrom(`http://latch.test/api/chats/${chatId}/events`, { signal: stop.signal });
+    assert(events.status === 200, `events route answers 200 (got ${events.status})`);
+    let work: Promise<void> = Promise.resolve();
+    const refresh = async () => {
+      const poll = (await (await fetchFrom(`http://latch.test/api/chats/${chatId}/poll`)).json()) as { messages: UIMessage[] };
+      // The tab's own stream is the truth while it is open.
+      if (tab.status === "ready") tab.messages = poll.messages;
+    };
+    const on = (event: ChatEvent) => {
+      seen.push(event);
+      const answering = event.type === "started" || (event.type === "hello" && event.running);
+      work = work.then(async () => {
+        // This tab sent the message: it is reading the answer already.
+        if (tab.status !== "ready") return;
+        // The history first (the message that started the answer may have
+        // come from elsewhere), then the answer.
+        await refresh();
+        if (answering) await tab.resumeStream();
+      });
+    };
+    void (async () => {
+      const reader = events.body!.pipeThrough(new TextDecoderStream()).getReader();
+      for (;;) {
+        const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
+        if (done || !value) return;
+        for (const line of value.split("\n\n")) if (line.startsWith("data: ")) on(JSON.parse(line.slice(6)) as ChatEvent);
       }
-    }
-  })();
-  const types = () => seen.map((e) => e.type).join(",");
-  await until("hello", () => seen.length === 1);
-  assert(JSON.stringify(seen[0]) === JSON.stringify({ type: "hello", running: false }), "tab 2 is told nothing is running");
+    })();
+    return { seen, types: () => seen.map((e) => e.type).join(","), settled: () => work, stop: () => stop.abort() };
+  };
+
+  // Both tabs watch the chat, each on its own instance.
+  const w1 = await watch(tab1, a.fetchFrom);
+  const w2 = await watch(tab2, b.fetchFrom);
+  await until("hello", () => w2.seen.length === 1);
+  assert(JSON.stringify(w2.seen[0]) === JSON.stringify({ type: "hello", running: false }), "tab 2 is told nothing is running");
+  await until("tab 2 has the history", () => tab2.text().join(" | ") === "user: hi | assistant: Hello.");
 
   // 1. Tab 1 sends a message on instance A. Tab 2, on B, is told and reads it live.
   const second = tab1.sendMessage({ text: "again" });
-  await until("started on B", () => types() === "hello,started");
+  await until("started on B", () => w2.types() === "hello,started");
   release(1, 0);
   await until("first half on tab 2", () => tab2.text().at(-1) === "assistant: Sec");
-  assert(tab1.text().at(-1) === "assistant: Sec", "tab 1 shows the first half");
+  await until("first half on tab 1", () => tab1.text().at(-1) === "assistant: Sec");
   assert(true, "tab 2 shows the first half of an answer written on the other instance, before it is finished");
   release(1, 1);
   await second;
   await until("answer ended on tab 2", () => tab2.text().at(-1) === "assistant: Second." && tab2.status === "ready");
-  await until("ended event", () => types() === "hello,started,ended");
+  await until("ended event", () => w2.types() === "hello,started,ended");
+  const four = "user: hi | assistant: Hello. | user: again | assistant: Second.";
   // The user's message was sent from tab 1; tab 2 got it from the history.
-  await until("tab 2 has tab 1's message", () => tab2.text().join(" | ") === "user: hi | assistant: Hello. | user: again | assistant: Second.");
-  assert(true, `tab 2 ends with the same conversation as tab 1 (${tab2.text().length} messages)`);
+  await until("tab 2 has tab 1's message", () => tab2.text().join(" | ") === four);
+  await w1.settled();
+  assert(tab1.text().join(" | ") === four, "tab 1, which sent the message and watches too, shows each message once");
+  assert(true, "tab 2 ends with the same conversation as tab 1");
 
   // 2. A signal from server code, with nobody's request attached, sent on
-  //    instance A. Tab 2 on B reads the answer live.
+  //    instance A. Both tabs read the answer live, and so does a third tab
+  //    that opens the chat in the middle of it.
   const signal = a.runtime.sendSignal({ chatId, principal: me, text: "The export is ready.", visibility: "user" });
-  await until("signal's answer started", () => types() === "hello,started,ended,started");
+  await until("signal's answer started", () => w2.types() === "hello,started,ended,started");
   release(2, 0);
   await until("first half of the signal's answer on tab 2", () => tab2.text().at(-1) === "assistant: Thi");
-  assert(true, "tab 2 reads the answer to a signal live");
+  await until("first half of the signal's answer on tab 1", () => tab1.text().at(-1) === "assistant: Thi");
+  assert(true, "both tabs read the answer to a signal live");
+  const tab3 = new Tab(chatId, b.fetchFrom);
+  const w3 = await watch(tab3, b.fetchFrom);
+  await until("tab 3 hello", () => w3.seen.length === 1);
+  assert(JSON.stringify(w3.seen[0]) === JSON.stringify({ type: "hello", running: true }), "a tab opened mid-answer is told one is running");
+  await until("first half on tab 3", () => tab3.text().at(-1) === "assistant: Thi");
+  assert(true, "a tab opened mid-answer shows what was written so far");
   release(2, 1);
   await signal;
-  await until("signal's answer ended on tab 2", () => tab2.text().at(-1) === "assistant: Third." && tab2.status === "ready");
-  await until("ended event", () => types() === "hello,started,ended,started,ended");
+  for (const [name, tab] of [["tab 1", tab1], ["tab 2", tab2], ["tab 3", tab3]] as const) {
+    await until(`signal's answer ended on ${name}`, () => tab.text().at(-1) === "assistant: Third." && tab.status === "ready");
+  }
+  await until("ended events", () => w2.types() === "hello,started,ended,started,ended" && w3.types() === "hello,ended");
+  await Promise.all([w1.settled(), w2.settled(), w3.settled()]);
+  assert(tab1.text().join(" | ") === tab2.text().join(" | ") && tab2.text().join(" | ") === tab3.text().join(" | "), `all three tabs show the same conversation (${tab3.text().join(" | ")})`);
 
   // 3. Nothing running: the stream route says so, and the client takes it.
   const none = await b.fetchFrom(`http://latch.test/api/chats/${chatId}/stream`);
@@ -240,8 +264,10 @@ async function main() {
   await tab2.resumeStream();
   assert(tab2.status === "ready" && tab2.error === undefined, "resuming with nothing running leaves the tab as it was");
 
-  stop.abort();
-  await Promise.all([reading, ...a.background, ...b.background]);
+  w1.stop();
+  w2.stop();
+  w3.stop();
+  await Promise.all([...a.background, ...b.background]);
   await Promise.all([a.close(), b.close()]);
   console.log("live-stream smoke: ok");
 }

@@ -4,6 +4,8 @@
  * whose chat got an answer nobody asked for from that page (a held message, a
  * signal, a schedule) reads the answer as it is written.
  *
+ * Experimental: the names and the events may change.
+ *
  * Optional. Without `liveStreams` on the runtime, such a page polls
  * (`pollChat`) and sees the answer once it is saved.
  *

@@ -21,14 +21,14 @@ The answer should appear as it's written. The AI SDK streams it to the browser, 
 
 **One answer at a time per chat.** A message sent while an answer is running gets `409 chat_busy` with how long to wait, and nothing is saved, so the client can resend it. Sent with `queue: true`, it is [held and answered next](/docs/guides/queue) instead.
 
-**A page without a stream can ask.** An answer started by a schedule, a signal or a held message has no page attached. `GET chats/:id/poll` says whether one is running and returns the history when it changed.
+**A page without a stream can ask.** An answer started by a schedule, a signal or a held message has no page attached. `GET chats/:id/poll` says whether one is running and returns the history when it changed. With [live updates](/docs/guides/live-updates) (experimental) the page is told, and reads the answer as it is written.
 
 **With crash recovery on, every step is saved as it finishes.** A reload shows the answer up to its last finished step; the rest appears when it's done. A server that took over a crashed answer saves to the same place.
 
 **A continued answer is the same message.** After an approval, the stream continues the paused assistant message (same id) instead of starting a new one, so the UI fills in where it stopped.
 
 <Callout type="warn" title="What isn't there yet">
-A reloaded page doesn't re-attach to an answer that's still streaming; it shows finished steps, then the whole answer once saved. The `stop` button in `useChat` ends the stream in the browser, but the answer keeps running on the server and is saved. Someone else viewing a shared chat sees an answer once it's saved, not live.
+By default a reloaded page doesn't re-attach to an answer that's still streaming; it shows finished steps, then the whole answer once saved, and someone else viewing a shared chat sees an answer once it's saved, not live. [Live updates](/docs/guides/live-updates) (experimental) change both. The `stop` button in `useChat` ends the stream in the browser, but the answer keeps running on the server and is saved.
 </Callout>
 
 In chat apps, streaming is real or not at all: Slack streams natively, other platforms get the finished answer. See [Chat apps](/docs/hard-parts/chat-apps).

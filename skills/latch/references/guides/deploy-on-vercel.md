@@ -67,6 +67,8 @@ An answer that runs past `maxDuration` isn't lost: the function stops, its lease
 
 With `queue: true`, a message held during an answer is answered by the invocation that wrote that answer, after its response has ended (that is what `waitUntil` on the runtime is for). Size `maxDuration` for more than one answer.
 
+A held message's answer, like a signal's, reaches an open page by polling. To show it as it is written, add Redis and [live updates](./live-updates.md) (experimental).
+
 A route that calls `runtime.sendSignal` needs `maxDuration` too. By default the agent answers the signal inside that call, so the function runs for as long as the answer takes. A route that should return at once passes `wake: false`, or wraps the call in `waitUntil` from `@vercel/functions`.
 
 ## 4. The cron

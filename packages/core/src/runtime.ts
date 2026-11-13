@@ -439,7 +439,7 @@ export interface RuntimeConfig<P, RuntimeContext = unknown> {
    */
   waitUntil?: (work: Promise<unknown>) => void;
   /**
-   * Where a running answer's stream is kept so a request other than the one
+   * Experimental. Where a running answer's stream is kept so a request other than the one
    * that started it can read it: a reloaded page, or a page whose chat got an
    * answer it didn't ask for (a held message, a signal, a schedule). Read
    * with `streamChat`. `memoryLiveStreams()` for one long-running server; a
@@ -912,14 +912,14 @@ export interface Runtime<P> {
    */
   pollChat(input: { chatId: string; principal: P; cursor?: string }): Promise<ChatPoll | null>;
   /**
-   * The stream of the answer running in a chat, from its start, as the
+   * Experimental. The stream of the answer running in a chat, from its start, as the
    * `Response` `useChat` reads when it resumes. `null` when no answer is
    * running, its stream can't be reached, the chat isn't the principal's, or
    * the runtime has no `liveStreams`.
    */
   streamChat(input: { chatId: string; principal: P }): Promise<Response | null>;
   /**
-   * One long-lived connection that tells a page what happens in a chat, as
+   * Experimental. One long-lived connection that tells a page what happens in a chat, as
    * server-sent events (`ChatEvent`): first whether an answer is running,
    * then each answer that starts and ends, and other changes. The page reads
    * an answer with `streamChat` and the rest with `pollChat`, with no poll
