@@ -486,40 +486,46 @@ export function makeStorageAdapter<P>(
       if (!(await getChat(principal, chatId))) return false;
       const here = and(eq(q.chatId, chatId), eq(q.id, message.id));
       const nextSeq = sql`(select coalesce(max(${q.seq}), -1) + 1 from ${q} where ${q.chatId} = ${chatId})`;
+      // The chat's id when the chat exists AND holds fewer than `cap`; NULL
+      // otherwise, which the NOT NULL column refuses. Admission is part of
+      // the insert itself: an input over the cap, or for a chat deleted since
+      // the check above, is never stored, not even for a moment.
+      const admitted = sql`(select ${s.chats.id} from ${s.chats} where ${s.chats.id} = ${chatId} and (select count(*) from ${q} where ${q.chatId} = ${chatId}) < ${cap})`;
+      const insert = (exec: any) =>
+        exec.insert(q).values({
+          chatId: admitted as unknown as string,
+          id: message.id,
+          message,
+          identity: principal,
+          seq: nextSeq as unknown as number,
+          createdAt: Date.now(),
+        });
       for (let attempt = 0; ; attempt++) {
-        // A retry of one already held replaces it in place, keeping its turn in line.
+        // A retry of one already held replaces it in place, keeping its turn
+        // in line. It was admitted when it was first held.
         const held: any[] = await db.update(q).set({ message }).where(here).returning({ id: q.id });
-        if (held.length) break;
+        if (held.length) return true;
         try {
-          await db.insert(q).values({
-            // NULL when the chat is gone (deleted since the check above): the
-            // NOT NULL column refuses it, so nothing is held for no chat.
-            chatId: chatRef(chatId) as unknown as string,
-            id: message.id,
-            message,
-            identity: principal,
-            seq: nextSeq as unknown as number,
-            createdAt: Date.now(),
-          });
-          break;
+          if (opts.lockFencedRun) {
+            // Postgres: each statement counts on its own snapshot, so two
+            // inserts at once could both see room. Lock the chat row first;
+            // the second waits, then counts what the first committed.
+            await opts.withTx(async (tx) => {
+              await tx.select({ id: s.chats.id }).from(s.chats).where(eq(s.chats.id, chatId)).for("update");
+              await insert(tx);
+            });
+          } else {
+            await insert(db);
+          }
+          return true;
         } catch (error) {
+          // Full, or the chat is gone.
           if (isNotNullViolation(error)) return false;
-          // Another input took this seq, or a retry of this one landed first: go again.
+          // A retry of this one landed first, or (SQLite over a network)
+          // another input took this seq: go again.
           if (!isUniqueViolation(error) || attempt >= 8) throw error;
         }
       }
-      // Admitted when it is among the first `cap` by arrival. Decided by the
-      // row's own place, so a retry that found the row and the call that
-      // inserted it reach the same answer.
-      const ahead: any[] = await db
-        .select({ id: q.id })
-        .from(q)
-        .where(and(eq(q.chatId, chatId), sql`${q.seq} <= (select ${q.seq} from ${q} where ${here})`));
-      // Gone already: its turn opened, so it was accepted.
-      if (ahead.length === 0 || ahead.length <= cap) return true;
-      const refused: any[] = await db.delete(q).where(here).returning({ id: q.id });
-      // Taken by a turn before it could be refused: it ran, so it was accepted.
-      return refused.length === 0;
     },
 
     async listQueuedInputs(principal, chatId) {

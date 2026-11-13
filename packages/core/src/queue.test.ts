@@ -5,6 +5,9 @@ import { MockLanguageModelV4 } from "ai/test";
 import { isChatBusyError, isQueueFullError } from "./storage.js";
 import type { AppMessage } from "./message.js";
 import { call, harness, principal, promptsOf, scripted, text, user } from "./__tests__/turn.js";
+import { memoryStorage } from "./__tests__/memory-storage.js";
+import { createRuntime } from "./runtime.js";
+import { defineAgent } from "./agent.js";
 
 /**
  * The input queue: a message or signal that arrives while an answer is
@@ -196,6 +199,77 @@ describe("taking held inputs when their turn opens", () => {
     expect(ticks[0]!.held + ticks[1]!.held).toBe(1);
     expect(model.doStreamCalls).toHaveLength(2);
     expect(roles(stored(h).filter((m) => m.metadata?.sendToModel !== false))).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+});
+
+describe("a held turn and what happens around it", () => {
+  it("is not undone by another worker that sees its inputs stored but not yet taken", async () => {
+    const model = scripted([text("a1"), text("a2"), text("a3")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    await h.mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+    // Between the held turn storing its input and taking it from the queue,
+    // a second worker looks at the same chat.
+    const append = h.mem.storage.appendMessages.bind(h.mem.storage);
+    let other: Promise<unknown> | undefined;
+    h.mem.storage.appendMessages = async (chatId, messages, ...rest) => {
+      const out = await append(chatId, messages, ...rest);
+      if (!other && messages.some((m) => m.id === "u2")) {
+        other = h.runtime.cron({ now: Date.now() + 120_000 });
+        await other;
+      }
+      return out;
+    };
+    const tick = await h.runtime.cron({ now: Date.now() + 60_000 });
+    expect(other).toBeDefined();
+    expect(tick.held).toBe(1);
+    expect(model.doStreamCalls).toHaveLength(2);
+    // Answered, and still there for the user to see.
+    expect(roles(await h.runtime.loadHistory({ chatId: "chat_1", principal }))).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+
+  it("doesn't bring back a chat that was deleted while its inputs were held", async () => {
+    const model = scripted([text("a1"), text("a2")]);
+    const h = harness({ model });
+    await h.turn(user("q1"));
+    await h.mem.storage.enqueueInput!(principal, "chat_1", user("q2", "u2"), { cap: 20 });
+    // Deleted just after the tick read what was held for it.
+    const list = h.mem.storage.listQueuedInputs!.bind(h.mem.storage);
+    h.mem.storage.listQueuedInputs = async (p, chatId) => {
+      const held = await list(p, chatId);
+      h.mem.chats.delete(chatId);
+      h.mem.messages.delete(chatId);
+      return held;
+    };
+    const tick = await h.runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(0);
+    expect(h.mem.chats.has("chat_1")).toBe(false);
+    expect(h.mem.messages.has("chat_1")).toBe(false);
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+  it("gives the agent the context of the message it really answers", async () => {
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    const seen: unknown[] = [];
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: {
+        a: defineAgent<typeof principal>(({ messageContext }) => {
+          seen.push(messageContext);
+          return { model, instructions: "Be brief." };
+        }),
+      },
+    });
+    const viewing = (id: string, t: string, file: string): AppMessage =>
+      ({ id, role: "user", parts: [{ type: "text", text: t }, { type: "data-context", data: { file } }], metadata: { visibility: "user" } }) as AppMessage;
+    const live = await runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: viewing("u1", "q1", "one.md") });
+    await runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: viewing("u2", "q2", "two.md"), ifBusy: "queue" });
+    await runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: viewing("u3", "q3", "three.md"), ifBusy: "queue" });
+    await live.text();
+    // The held turn answers u2 and u3: the agent is built for the later one.
+    expect(seen.at(-1)).toEqual({ file: "three.md" });
+    expect(model.doStreamCalls).toHaveLength(2);
   });
 });
 

@@ -797,6 +797,12 @@ function checks<P>(): ConformanceCheck<P>[] {
         check(!(await store.enqueueInput(me, chat.id, msg("q3"), { cap: 2 })), "the third is refused");
         check((await store.listQueuedInputs(me, chat.id)).length === 2, "and not stored");
         check(await store.enqueueInput(me, chat.id, msg("q2", "again"), { cap: 2 }), "a retry of one held still fits");
+        // Many at once for the places left: never one too many, none lost.
+        const busy = await store.createChat(me, { agent: "a" });
+        const results = await Promise.all([0, 1, 2, 3, 4, 5].map((i) => store.enqueueInput!(me, busy.id, msg(`c${i}`), { cap: 3 })));
+        const kept = await store.listQueuedInputs(me, busy.id);
+        check(kept.length <= 3, `the cap holds under concurrent calls (${kept.length})`);
+        check(kept.length === results.filter(Boolean).length, "and every call told accepted is held");
       },
     },
     {

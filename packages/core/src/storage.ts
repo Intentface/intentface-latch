@@ -651,9 +651,10 @@ export interface StorageAdapter<P> {
    * a chat that is gone. Stores the principal as the input's `identity`,
    * like a run does. Upserts by `(chatId, message.id)`, keeping the first
    * arrival's place. Returns
-   * `false`, storing nothing, when the chat already holds `cap` inputs. Two
-   * callers racing for the last place may both be refused; the chat must
-   * never hold more than `cap`.
+   * `false`, storing nothing, when the chat already holds `cap` inputs. The
+   * check is part of the write: an input over the cap is never stored, even
+   * for a moment (a turn could take it before it was refused), and calls at
+   * once never leave the chat holding more than `cap`.
    *
    * Without these three, a message sent to a busy chat is refused
    * (`ChatBusyError`) and a signal waits for the user's next message.

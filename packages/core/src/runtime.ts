@@ -63,6 +63,7 @@ import {
   refileTarget,
   UnsupportedOperationError,
   QueueFullError,
+  type QueuedInput,
   type ChatRecord,
   type PurgeOptions,
   type PurgeResult,
@@ -4873,7 +4874,7 @@ export function createRuntime<P, RC = unknown>(
      * opens with exactly those. Throws `NothingHeld` when none is left
      * (another worker answered them, or they were taken back).
      */
-    held?: AppMessage[];
+    held?: QueuedInput[];
     /** Don't start a turn for held inputs when this one ends (the caller is the one draining). */
     noDrain?: boolean;
   }): Promise<{ chatId: string; answer: string; parked: boolean; pending?: SubagentPending[]; error?: string }> {
@@ -4881,6 +4882,9 @@ export function createRuntime<P, RC = unknown>(
     // created with id "" and the UI can never open it.
     const chatId = o.chatId?.trim() || generateSubchatId();
     let chat = await storage.getChat(o.principal, chatId);
+    // Held inputs belong to a chat that exists: one that is gone was deleted,
+    // and must not come back with what was held for it.
+    if (!chat && o.held) throw new NothingHeld();
     const newParams = await checkChatParams(o.agent, chat, o.params);
     if (!chat) {
       chat = await storage.createChat(o.principal, {
@@ -4901,11 +4905,10 @@ export function createRuntime<P, RC = unknown>(
       throw new Error(`Thread ${chatId} was delegated by another agent; omit threadId to start a new one.`);
     }
     const prior = await storage.loadMessages(o.principal, chatId);
-    let opening = o.held ? arrangeHeld(o.held) : [o.message];
-    if (o.held && o.held.every((m) => prior.some((p) => p.id === m.id))) {
-      await storage.removeQueuedInputs!(chatId, o.held.map((m) => m.id), { ownerKey: chat.owner });
-      throw new NothingHeld();
-    }
+    // Held inputs are settled once the run is open (below); until then
+    // nothing about the queue is decided from here. An input in `prior` may
+    // be one another run stored a moment ago and is about to take.
+    let opening = o.held ? arrangeHeld(o.held.map((q) => q.message)) : [o.message];
     if (o.refuseIfWaiting) {
       const tail = tailOf(prior);
       if (hasPendingApproval(prior) || (!!tail && hasPendingToolResult([tail]))) throw new WaitingOnPerson();
@@ -4923,15 +4926,17 @@ export function createRuntime<P, RC = unknown>(
     // leaves nothing behind, same as handleChat. Same for a busy chat: open
     // the run first, persist the message only once it is ours to run.
     const admitted = await admitTurn(o.principal, o.agent, o.trigger);
-    const { cfg, modelId, runtimeCtx, params, messageContext, run, lease } = await withReservation(admitted, async () => {
-      const resolved = await resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext, {
+    const resolveFor = (messageContext: unknown) =>
+      resolveAgentConfig(o.agent, o.principal, undefined, o.turnContext, {
         // A continued thread keeps the parent it was created under (a mismatch
         // was refused above). Without a stored one — an adapter that doesn't
         // persist the column — the spawner of THIS turn is the parent: a host
         // that restricts a subagent by its parent must never see none.
         parentAgent: chat.parentAgent ?? o.parentAgent,
         autoApprove: o.autoApprove,
-      }, chat.params, contextOf(o.message));
+      }, chat.params, messageContext);
+    let { cfg, modelId, runtimeCtx, params, messageContext, run, lease } = await withReservation(admitted, async () => {
+      const resolved = await resolveFor(contextOf(o.message));
       const opened = await openTurn(o.principal, chat, o.agent, o.held ? [] : opening, resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
@@ -4959,14 +4964,26 @@ export function createRuntime<P, RC = unknown>(
       // may take one back at any moment.
       const queue = ownedBy(chat.owner);
       history = await storage.loadMessages(o.principal, chatId);
-      const answered = o.held.filter((m) => history.some((p) => p.id === m.id));
-      if (answered.length > 0) await queue.removeQueuedInputs(chatId, answered.map((m) => m.id));
-      const left = o.held.filter((m) => !answered.includes(m));
+      // In the history already: answered by a run that ended before this one
+      // opened (no other run is live now), so its queue copy is left over.
+      const answered = o.held.filter((q) => history.some((p) => p.id === q.message.id));
+      if (answered.length > 0) await queue.removeQueuedInputs(chatId, answered.map((q) => q.message.id));
+      // Of the rest, the ones still held: some may have been taken back since they were listed.
+      const now = new Set((await storage.listQueuedInputs!(o.principal, chatId)).map((q) => q.message.id));
+      const present = o.held.filter((q) => !answered.includes(q) && now.has(q.message.id));
+      const left = present.map((q) => q.message);
       if (left.length === 0 || waitingIn(history)) {
         // Nothing left, or an answer ended on a request for the person just
         // before this run opened: the inputs stay held, untouched.
         await giveUp(left.length === 0 ? "nothing left to answer" : "the chat is waiting on a person");
         throw left.length === 0 ? new NothingHeld() : new WaitingOnPerson();
+      }
+      // The turn runs as whoever sent the first user message. If that one was
+      // taken back and another person's now leads, start over as them.
+      const lead = present.find((q) => !isSignal(q.message)) ?? present[0]!;
+      if (lead.message.id !== o.message.id && JSON.stringify(lead.identity) !== JSON.stringify(o.held.find((q) => q.message.id === o.message.id)?.identity)) {
+        await giveUp("the input it was opened for was taken back");
+        throw new NothingHeld();
       }
       // Stored first, then taken from the queue: a crash between the two
       // leaves them in the history (a recovered run answers them) and the
@@ -4987,6 +5004,18 @@ export function createRuntime<P, RC = unknown>(
       // A signal that now opens the turn, where another did before one was taken back.
       const remarked = opening.filter((m) => JSON.stringify(m.metadata) !== JSON.stringify(stored.find((x) => x.id === m.id)!.metadata));
       if (remarked.length > 0) await queue.appendMessages(chatId, remarked);
+      // The agent, its tools and `messageContext` follow the message being
+      // answered: the latest user message of the ones this turn really opens
+      // with, not the stand-in the run was opened for.
+      const answering = latestMessageContext(opening);
+      if (JSON.stringify(answering) !== JSON.stringify(contextOf(o.message))) {
+        try {
+          ({ cfg, modelId, runtimeCtx, params, messageContext } = await resolveFor(answering));
+        } catch (e) {
+          await giveUp("its agent could not be resolved");
+          throw e;
+        }
+      }
     } else if (o.refuseIfWaiting) {
       // Up to the opening message only: a signal stored after it (no lease
       // stops one) belongs to a later turn, where it is stored.
@@ -5127,17 +5156,16 @@ export function createRuntime<P, RC = unknown>(
         await storage.removeQueuedInputs!(chatId, [lead.message.id], { ownerKey: chat.owner });
         continue;
       }
-      const inputs = held.map((q) => q.message);
       try {
         await runToCompletion({
           principal: as,
           agent: chat.agent,
           chatId,
-          held: inputs,
+          held,
           // Stands in for the turn's message until the run knows which are left.
           message: lead.message,
           autoApprove: false,
-          trigger: inputs.some((m) => !isSignal(m)) ? "chat" : "programmatic",
+          trigger: held.some((q) => !isSignal(q.message)) ? "chat" : "programmatic",
           // A held input is not the answer to a pending approval.
           refuseIfWaiting: true,
           noDrain: true,
