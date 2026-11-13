@@ -6,6 +6,7 @@
     "approvals",
     "signals",
     "queue",
+    "live-updates",
     "schedules",
     "scheduled-brief",
     "ownership-patterns",

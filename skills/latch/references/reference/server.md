@@ -65,6 +65,8 @@ Paths are relative to `basePath`. Every route except the cron route and the conn
 | `GET chats` | The caller's chats. |
 | `GET chats/:chatId` | One chat's messages. |
 | `GET chats/:chatId/poll?cursor=…` | Whether an answer is running, the messages waiting, and the history when it differs from `cursor`. For a page with no stream open. |
+| `GET chats/:chatId/events` | Server-sent events for a page watching the chat: an answer started or ended, something else changed. `404` when the runtime has no `liveStreams` that can notify. Experimental; see [live updates](../guides/live-updates.md). |
+| `GET chats/:chatId/stream` | The stream of the answer running in the chat, from its start. `204` when nothing is running or the runtime keeps no live streams. Experimental. |
 | `DELETE chats/:chatId/queue/:messageId` | Take back a waiting message the caller can see. `404` once its turn started. |
 | `DELETE chats/:chatId` | Delete the chat with its messages, runs and usage, and the subagent threads it spawned. `404` if it isn't the caller's, `409` while an answer runs, `501` if storage can't delete. |
 | `GET runs` | The caller's runs, with usage and cost. |

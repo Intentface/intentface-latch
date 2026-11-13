@@ -28,6 +28,8 @@ runtime.applyApproval({ chatId, principal, decisions });     // a person's decis
 runtime.sendSignal({ chatId, principal, text });             // something your server tells a chat
 runtime.loadHistory({ chatId, principal });                  // a conversation, for display
 runtime.pollChat({ chatId, principal, cursor });             // the same, only when it changed
+runtime.watchChat({ chatId, principal });                    // events for an open page (experimental)
+runtime.streamChat({ chatId, principal });                   // the running answer's stream (experimental)
 runtime.cron();                                               // every minute: schedules and crash recovery
 ```
 

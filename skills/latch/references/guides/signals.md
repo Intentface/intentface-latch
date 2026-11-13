@@ -123,4 +123,4 @@ Documents, search results and tool output don't belong in a signal. A system mes
 
 ## What it doesn't do yet
 
-- **Stream to an open page.** A visible signal, and the agent's answer to one, appear when the page next loads its history or [polls the chat](./queue.md#keep-the-page-current-without-a-stream).
+- **Stream to an open page.** A visible signal, and the agent's answer to one, appear when the page next loads its history or [polls the chat](./queue.md#keep-the-page-current-without-a-stream). [Live updates](./live-updates.md) (experimental) add that.

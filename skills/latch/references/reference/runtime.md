@@ -18,6 +18,8 @@ Online: https://intentface-latch-docs.vercel.app/docs/reference/runtime
 | `listQueued` | `(input: { chatId: string; principal: P; }) => Promise<AppMessage[]>` | The messages held for a chat that was busy when they arrived, oldest first, as the user may see them (a signal the user doesn't see is left out). They join the history when their turn starts. |
 | `cancelQueued` | `(input: { chatId: string; principal: P; id: string; }) => Promise<boolean>` | Takes a held message back before its turn starts. `false` when it isn't held any more (its turn started, or it never was). |
 | `pollChat` | `(input: { chatId: string; principal: P; cursor?: string; }) => Promise<ChatPoll \| null>` | What a page needs to stay current without a stream: whether an answer is running, what is held, and the history when it differs from what the page has. Pass the `cursor` of the last result; `messages` is left out when nothing changed. A running answer is saved after each step, so polling shows it grow step by step. `null` when the chat doesn't exist or isn't the principal's. |
+| `streamChat` | `(input: { chatId: string; principal: P; }) => Promise<Response \| null>` | Experimental. The stream of the answer running in a chat, from its start, as the `Response` `useChat` reads when it resumes. `null` when no answer is running, its stream can't be reached, the chat isn't the principal's, or the runtime has no `liveStreams`. |
+| `watchChat` | `(input: { chatId: string; principal: P; }) => Promise<Response \| null>` | Experimental. One long-lived connection that tells a page what happens in a chat, as server-sent events (`ChatEvent`): first whether an answer is running, then each answer that starts and ends, and other changes. The page reads an answer with `streamChat` and the rest with `pollChat`, with no poll loop. `null` when the chat isn't the principal's or `liveStreams` has no `notify` and `listen`. A host that cuts long responses just ends it; the browser's `EventSource` connects again. |
 | `loadHistory` | `(input: { chatId: string; principal: P; }) => Promise<AppMessage[]>` | A chat's messages for showing to the user, with internal messages left out. Use it to render a conversation when the page loads. |
 | `listChats` | `(input: { principal: P; limit?: number; kind?: string; }) => Promise<ChatRecord[]>` | The caller's chats, newest first, for a sidebar. Pass `kind: "user"` to leave out the threads subagents use internally. |
 | `getChat` | `(input: { principal: P; id: string; }) => Promise<ChatRecord \| null>` | One chat, or `null` when it doesn't exist or isn't the caller's. |
@@ -154,6 +156,27 @@ if (poll?.messages) render(poll.messages); // absent when nothing changed since 
 | `running` | `boolean` | An answer is running in the chat. |
 | `queued` | `AppMessage[]` | Held messages the user may see (see `listQueued`). |
 | `messages` (optional) | `AppMessage[]` | The history, as `loadHistory` returns it. Absent when it matches `cursor`. |
+
+## watchChat, streamChat
+
+Experimental. For a page that didn't start the answer it should show: a second tab, a reloaded page, the answer to a signal or a held message. Both need `liveStreams` on the runtime; see [live updates](../guides/live-updates.md).
+
+```ts
+// One long-lived connection per open chat: server-sent `ChatEvent`s.
+const events = await runtime.watchChat({ chatId, principal }); // Response | null
+
+// The running answer from its start, as `useChat` reads it when it resumes.
+const stream = await runtime.streamChat({ chatId, principal }); // Response | null
+```
+
+`watchChat` returns `null` when the chat isn't the principal's or `liveStreams` can't notify. `streamChat` returns `null` when no answer is running.
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `publish` | `(streamId: string, stream: ReadableStream<string>) => Promise<void>` | Keep `stream` readable under `streamId` until it ends. Called once per id, when the answer starts. Must read `stream` to its end whether or not anybody subscribes. |
+| `subscribe` | `(streamId: string) => Promise<ReadableStream<string> \| null>` | The stream from its start, then live. `null` when it has ended or was never published (the answer is in the history, or will be). |
+| `notify` (optional) | `((channel: string, message: string) => Promise<void>)` | Optional, with `listen`: send `message` to whoever listens on `channel` right now. Nothing is kept for a later listener. With both, a page can hold one connection per chat and be told when an answer starts (`watchChat`) instead of polling. |
+| `listen` (optional) | `((channel: string) => Promise<ReadableStream<string>>)` | What is sent to `channel` from now on. Cancel the stream to stop. |
 
 ## applyApproval
 

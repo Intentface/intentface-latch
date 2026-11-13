@@ -82,7 +82,7 @@ A [signal](./signals.md) sent with `visibility: "user"` is in the history as a m
 )}
 ```
 
-Nothing streams to the page for a signal: it, and the agent's answer to it, are there the next time the page loads the history, or [polls the chat](./queue.md#keep-the-page-current-without-a-stream).
+Nothing streams to the page for a signal: it, and the agent's answer to it, are there the next time the page loads the history, or [polls the chat](./queue.md#keep-the-page-current-without-a-stream). To show both as they happen, see [live updates](./live-updates.md) (experimental).
 
 ## Sending while an answer is running
 

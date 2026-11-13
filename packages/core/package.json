@@ -89,9 +89,9 @@
     "@ai-sdk/anthropic": ">=4.0.0",
     "@ai-sdk/google": ">=4.0.0",
     "@ai-sdk/openai": ">=4.0.0",
+    "@intentface/latch-net": "workspace:^",
     "ai": ">=7.0.0",
-    "turndown": ">=7.0.0",
-    "@intentface/latch-net": "workspace:^"
+    "turndown": ">=7.0.0"
   },
   "devDependencies": {
     "@ai-sdk/anthropic": "^4.0.57",
@@ -101,6 +101,7 @@
     "@types/node": "^22",
     "@types/turndown": "^5.0.6",
     "ai": "^7.0.106",
+    "resumable-stream": "^2.2.13",
     "turndown": "^7.2.4",
     "typescript": "^5.7.0",
     "vitest": "^4"

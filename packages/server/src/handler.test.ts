@@ -466,19 +466,21 @@ describe("DELETE chats/:id", () => {
 
 describe("the queue and poll routes", () => {
   const principal = { orgId: "org_a", userId: "u1" };
-  function routes(o?: { waiting?: string[]; poll?: unknown; cancel?: boolean }) {
+  function routes(o?: { waiting?: string[]; poll?: unknown; cancel?: boolean; live?: Response }) {
     const handleChat = vi.fn(async (_i: { ifBusy?: string }) => new Response("ok"));
     const pollChat = vi.fn(async (_i: { cursor?: string }) => (o && "poll" in o ? o.poll : { cursor: "c2", running: false, queued: [] }));
     const listQueued = vi.fn(async () => (o?.waiting ?? []).map((id) => ({ id })));
     const cancelQueued = vi.fn(async (_i: { id: string }) => o?.cancel ?? true);
+    const streamChat = vi.fn(async (_i: { chatId: string }) => o?.live ?? null);
+    const watchChat = vi.fn(async (_i: { chatId: string }) => o?.live ?? null);
     const handler = createLatchHandler<P>({
-      runtime: { handleChat, pollChat, listQueued, cancelQueued } as never,
+      runtime: { handleChat, pollChat, listQueued, cancelQueued, streamChat, watchChat } as never,
       connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
       basePath: "/api/latch",
       resolvePrincipal: () => principal,
     });
     const req = (path: string, init?: RequestInit) => new Request(`https://app.example/api/latch/${path}`, init);
-    return { handler, req, handleChat, pollChat, listQueued, cancelQueued };
+    return { handler, req, handleChat, pollChat, listQueued, cancelQueued, streamChat };
   }
   const send = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
 
@@ -504,6 +506,20 @@ describe("the queue and poll routes", () => {
     expect(await res!.json()).toEqual({ cursor: "c2", running: false, queued: [] });
     expect(r.pollChat.mock.calls[0]![0]).toEqual({ chatId: "chat_1", principal, cursor: "c1" });
     expect((await routes({ poll: null }).handler(r.req("chats/nope/poll")))?.status).toBe(404);
+  });
+
+  it("returns the running answer's stream, and 204 when there is none", async () => {
+    const r = routes({ live: new Response("data: x\n\n") });
+    const res = await r.handler(r.req("chats/chat_1/stream"));
+    expect(await res!.text()).toBe("data: x\n\n");
+    expect(r.streamChat.mock.calls[0]![0]).toEqual({ chatId: "chat_1", principal });
+    expect((await routes().handler(r.req("chats/chat_1/stream")))?.status).toBe(204);
+  });
+
+  it("returns the chat's events, and 404 when the runtime can't notify", async () => {
+    const r = routes({ live: new Response("data: {}\n\n") });
+    expect(await (await r.handler(r.req("chats/chat_1/events")))!.text()).toBe("data: {}\n\n");
+    expect((await routes().handler(r.req("chats/chat_1/events")))?.status).toBe(404);
   });
 
   it("takes back a waiting message the caller can see, and nothing else", async () => {

@@ -71,7 +71,7 @@ Over HTTP: the poll below returns `queued`, and `DELETE chats/:chatId/queue/:mes
 
 ## Keep the page current without a stream
 
-A held message is answered after the stream that was open has ended, and a signal's answer is written by whatever server code sent it. Neither reaches an open page on its own. The page asks:
+A held message is answered after the stream that was open has ended, and a signal's answer is written by whatever server code sent it. Neither reaches an open page on its own. The page asks (or, with [live updates](/docs/guides/live-updates), is told):
 
 ```ts
 const poll = await runtime.pollChat({ chatId, principal, cursor });
@@ -144,6 +144,6 @@ Without it, Latch keeps the open stream open, with nothing more on it, until the
 
 ## What it doesn't do yet
 
-- **Stream the next turn to the page.** The answer to a held message arrives by polling, step by step.
+- **Stream the next turn to the page.** The answer to a held message arrives by polling, step by step, unless you set up [live updates](/docs/guides/live-updates) (experimental).
 - **Expire.** A held input waits as long as it takes, for example behind an approval nobody answers.
 - **Poll cheaply on long chats.** Each poll reads the whole history on the server to tell whether it changed; only the response is small.
