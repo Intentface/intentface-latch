@@ -22,6 +22,7 @@
     "smoke:writer": "tsx --conditions development src/writer.smoke.ts",
     "smoke:cost": "tsx --conditions development src/cost.smoke.ts",
     "smoke:projections": "tsx --conditions development src/projections.smoke.ts",
+    "smoke:live-stream": "tsx --conditions development src/live-stream.smoke.ts",
     "serve": "tsx --conditions development --env-file=.env src/serve.ts"
   },
   "dependencies": {
@@ -43,6 +44,8 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^25.9.3",
     "better-sqlite3": "^12.11.1",
+    "redis": "^6.3.1",
+    "resumable-stream": "^2.2.13",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }
