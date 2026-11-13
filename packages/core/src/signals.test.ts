@@ -419,6 +419,34 @@ describe("sendSignal with wake", () => {
     expect([...h.mem.runs.values()].at(-1)!.status).toBe("completed");
   });
 
+  it("gives the turn up when an answer ended on a request for the person just before it opened", async () => {
+    const tools = { getTimezone: tool({ description: "The user's timezone.", inputSchema: z.object({}) }) };
+    const model = scripted([call("getTimezone"), text("Helsinki then.")]);
+    const h = harness({ model, tools });
+    await h.turn(user("what time is it for me?"));
+    // The signal's first read of the history is from before that answer paused.
+    const load = h.mem.storage.loadMessages.bind(h.mem.storage);
+    let reads = 0;
+    h.mem.storage.loadMessages = async (p, chatId) => {
+      const all = await load(p, chatId);
+      return ++reads === 1 ? all.slice(0, 1) : all;
+    };
+
+    const sent = await h.runtime.sendSignal({ chatId: "chat_1", principal, text: "news" });
+    expect(sent).toEqual({ id: sent!.id });
+    expect(model.doStreamCalls).toHaveLength(1);
+    const stored = h.mem.messages.get("chat_1")!;
+    expect(stored.map((m) => m.role)).toEqual(["user", "assistant", "system"]);
+    // Kept as a signal that waits, and the run it opened is closed.
+    expect(stored[2]!.metadata!.signal).toEqual({ kind: "notice" });
+    expect([...h.mem.runs.values()].at(-1)!.status).toBe("errored");
+    // The paused call is still there to answer, and was not declined.
+    const res = await h.runtime.applyToolResult({ chatId: "chat_1", principal, toolCallId: "call_1", output: { tz: "Europe/Helsinki" } });
+    await res.text();
+    expect([...h.mem.runs.values()].at(-1)!.status).toBe("completed");
+    expect(JSON.stringify(promptsOf(model)[1])).not.toContain("news");
+  });
+
   it("gives no answer for a turn that failed, not the one before it", async () => {
     const base = scripted([text("a1")]);
     let calls = 0;

@@ -1318,7 +1318,12 @@ const SUPERSEDED_REASON =
  * user has walked away from. Mutates in place; returns the changed messages.
  */
 /** Thrown by `runToCompletion({ refuseIfWaiting })`; never leaves the runtime. */
-class WaitingOnPerson extends Error {}
+class WaitingOnPerson extends Error {
+  /** The message is in the history already, as a signal that waits (the turn was opened, then given up). */
+  constructor(readonly stored = false) {
+    super("the chat is waiting on a person");
+  }
+}
 
 function declinePendingApprovals(messages: AppMessage[]): AppMessage[] {
   const last = tailOf(messages);
@@ -4424,6 +4429,8 @@ export function createRuntime<P, RC = unknown>(
         // The chat waits on a person, an answer is running, or a limit is
         // reached: nothing was stored. Keep the signal for the next message.
         if (!(e instanceof WaitingOnPerson) && !isChatBusyError(e) && !isLimitExceededError(e)) throw e;
+        // The turn was opened and given up: the signal is stored already.
+        if (e instanceof WaitingOnPerson && e.stored) return { id: messageId };
       }
     }
     // No fence: it belongs to no run.
@@ -4714,6 +4721,29 @@ export function createRuntime<P, RC = unknown>(
       const opened = await openTurn(o.principal, chat, o.agent, [o.message], resolved.cfg.configVersion, runSettingsOf(o));
       return { ...resolved, ...opened };
     });
+    // The check above read the history before the run was ours: a turn that
+    // was still running then may have ended since, on an answer or on a
+    // request for a person. Read again now that nothing else can write.
+    let history = prior;
+    if (o.refuseIfWaiting) {
+      history = (await storage.loadMessages(o.principal, chatId)).filter((m) => m.id !== o.message.id);
+      const tail = tailOf(history);
+      if (hasPendingApproval(history) || (!!tail && hasPendingToolResult([tail]))) {
+        // Give the turn up: the signal stays, as one that waits for the next
+        // message, and the request for the person is still the last thing said.
+        const { startsTurn: _, ...mark } = o.message.metadata?.signal ?? ({} as SignalMark);
+        await ownedBy(chat.owner).appendMessages(chatId, [
+          { ...o.message, metadata: { ...o.message.metadata, signal: mark } } as AppMessage,
+        ]);
+        await ownedBy(run.ownerKey).updateRun(
+          run.id,
+          { status: "errored", error: "not started: the chat is waiting on a person", endedAt: Date.now(), leaseOwner: null, leaseExpiresAt: null },
+          lease,
+        );
+        await releaseReservation(admitted);
+        throw new WaitingOnPerson(true);
+      }
+    }
     const onProgress = o.onProgress;
     let res: Response;
     try {
@@ -4724,7 +4754,7 @@ export function createRuntime<P, RC = unknown>(
         cfg,
         run,
         lease,
-        uiMessages: [...prior, o.message],
+        uiMessages: [...history, o.message],
         runtimeCtx,
         params,
         messageContext,
