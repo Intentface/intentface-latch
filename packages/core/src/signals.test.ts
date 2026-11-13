@@ -6,6 +6,7 @@ import { anthropicTakesSystemMidConversation, defaultNoticePlacement, placeSigna
 import { isInvalidMessageError, RewindNotSupportedError, type AppMessage, type SignalMark } from "./message.js";
 import { tool } from "ai";
 import { z } from "zod";
+import { ChatBusyError } from "./storage.js";
 import { call, harness, principal, promptsOf, scripted, text, user } from "./__tests__/turn.js";
 
 /**
