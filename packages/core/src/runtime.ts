@@ -4977,7 +4977,12 @@ export function createRuntime<P, RC = unknown>(
       // paused past its lease finds another run answering these inputs.
       const fence: RunFence | undefined = lease ? { runId: run.id, ...lease } : undefined;
       const taken = await queue.takeQueuedInputs(chatId, run.id, fence);
-      if (taken === null) throw new RunLost();
+      if (taken === null) {
+        // Not this run's to close (its successor has the chat), but the turn
+        // it reserved never ran: give that back.
+        await releaseReservation(admitted);
+        throw new RunLost();
+      }
       /** The turn can't start: what was taken waits again, to be tried later. */
       const putBack = async (why: string) => {
         await queue.returnQueuedInputs(chatId, run.id);
@@ -5017,7 +5022,10 @@ export function createRuntime<P, RC = unknown>(
       // in the queue, where the next run to look finds them stored and
       // clears them.
       // Fenced: agent resolution above may have outlasted the lease.
-      if ((await queue.appendMessages(chatId, opening, fence)) === false) throw new RunLost();
+      if ((await queue.appendMessages(chatId, opening, fence)) === false) {
+        await releaseReservation(admitted);
+        throw new RunLost();
+      }
       await queue.finishQueuedInputs(chatId, run.id);
     } else if (o.refuseIfWaiting) {
       // Up to the opening message only: a signal stored after it (no lease
@@ -5168,7 +5176,9 @@ export function createRuntime<P, RC = unknown>(
         // run took it and died before storing it, it waits again first; one
         // a live run holds is being answered, and is left alone.
         if (lead.takenBy) {
-          const holder = await ownedBy(chat.owner).getRun(lead.takenBy).catch(() => null);
+          // A lookup that fails is not a dead run: it throws, and nothing is
+          // released from under a run that may be answering.
+          const holder = await ownedBy(chat.owner).getRun(lead.takenBy);
           if (holder?.status === "active") return started;
           await ownedBy(chat.owner).returnQueuedInputs(chatId, lead.takenBy);
         }
@@ -5241,7 +5251,8 @@ export function createRuntime<P, RC = unknown>(
           if (tried.has(key)) continue;
           tried.add(key);
           const principal = await reconstructPrincipal(identity);
-          if (!principal) continue;
+          // May no longer act, or can no longer see this chat: try the next sender.
+          if (!principal || !(await storage.getChat(principal, chatId))) continue;
           started += await drainQueue(chatId, principal);
           break;
         }

@@ -536,6 +536,51 @@ describe("runtime.cron", () => {
     expect(h.mem.queued.get("chat_broken")).toHaveLength(1);
   });
 
+  it("reads a shared chat as a sender who can still see it", async () => {
+    const ann = { orgId: "org_a", userId: "ann" };
+    const bo = { orgId: "org_a", userId: "bo" };
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: { a: defineAgent<typeof principal>({ model, instructions: "Be brief." }) },
+    });
+    await (await runtime.handleChat({ agent: "a", principal: bo, chatId: "chat_1", message: user("q1") })).text();
+    await mem.storage.enqueueInput!(ann, "chat_1", { ...user("fyi", "s1"), role: "system", metadata: { visibility: "internal", signal: { kind: "notice" } } } as AppMessage, { cap: 20 });
+    await mem.storage.enqueueInput!(bo, "chat_1", user("from bo", "u2"), { cap: 20 });
+    // Ann was moved out of the chat's owner since: her reads of it find nothing.
+    const getChat = mem.storage.getChat.bind(mem.storage);
+    mem.storage.getChat = async (p, id) => (p.userId === "ann" ? null : getChat(p, id));
+
+    const tick = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(1);
+    expect(JSON.stringify(promptsOf(model)[1])).toContain("from bo");
+  });
+
+  it("releases nothing when it can't tell whether the run holding an input is alive", async () => {
+    const mem = memoryStorage<typeof principal>();
+    const model = scripted([text("a1"), text("a2")]);
+    const runtime = createRuntime<typeof principal>({
+      storage: mem.storage,
+      agents: { a: defineAgent<typeof principal>({ model, instructions: "Be brief." }) },
+      reconstructPrincipal: async (identity) => ((identity as typeof principal).userId === "gone" ? null : (identity as typeof principal)),
+    });
+    await (await runtime.handleChat({ agent: "a", principal, chatId: "chat_1", message: user("q1") })).text();
+    await mem.storage.enqueueInput!({ orgId: "org_a", userId: "gone" }, "chat_1", user("q2", "u2"), { cap: 20 });
+    await mem.storage.enqueueInput!(principal, "chat_1", user("q3", "u3"), { cap: 20 });
+    const holder = await mem.storage.createRun(principal, { chatId: "chat_1", agent: "a" });
+    await mem.storage.takeQueuedInputs!("chat_1", holder.id);
+    mem.storage.getRun = async () => {
+      throw new Error("db down");
+    };
+
+    const tick = await runtime.cron({ now: Date.now() + 60_000 });
+    expect(tick.held).toBe(0);
+    expect(tick.errors.some((e) => e.includes("db down"))).toBe(true);
+    // Still that run's: neither put back in line nor dropped.
+    expect(mem.queued.get("chat_1")!.map((q) => [q.message.id, q.takenBy])).toEqual([["u2", holder.id], ["u3", holder.id]]);
+  });
+
   it("leaves a chat that is waiting on a person alone", async () => {
     const tools = { getTimezone: tool({ description: "The user's timezone.", inputSchema: z.object({}) }) };
     const model = scripted([call("getTimezone"), text("Helsinki then.")]);
