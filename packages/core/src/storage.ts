@@ -402,6 +402,18 @@ export interface StorageAdapter<P> {
     fence?: RunFence,
     scope?: OwnerScope<P>,
   ): Promise<void | boolean>;
+  /**
+   * Replace a stored message ONLY IF its parts still read as `expected`'s: a
+   * compare-and-swap, checked in the same statement as the write. Resolves
+   * false, having written nothing, when they differ (or the message is gone).
+   *
+   * The runtime uses it where two requests can each change the same message
+   * without a run between them: one step asked two questions, and both answers
+   * arrive together. With a plain `appendMessages` each saves its own copy and
+   * the later one drops the earlier answer. Optional: without it the runtime
+   * falls back to `appendMessages`, and that race stays open.
+   */
+  replaceMessage?(chatId: string, expected: AppMessage, message: AppMessage, scope?: OwnerScope<P>): Promise<boolean>;
 
   // runs (per-turn execution record)
   /** T1 / non-durable: an unleased run. Stores the identity blob for resume. */
@@ -810,6 +822,27 @@ export class QueueFullError extends Error {
 
 export function isQueueFullError(e: unknown): e is QueueFullError {
   return e instanceof QueueFullError || (e as { code?: unknown } | null)?.code === "queue_full";
+}
+
+/**
+ * Thrown by `applyToolResult` when the chat holds no tool call with that id:
+ * the step that asked was never saved (its turn failed after streaming), or
+ * the id is wrong. Nothing was stored and no turn ran. The server answers
+ * `409`. A call that was already answered is not this: that is a no-op.
+ */
+export class ToolCallNotFoundError extends Error {
+  readonly code = "tool_call_not_found";
+  constructor(
+    readonly chatId: string,
+    readonly toolCallId: string,
+  ) {
+    super("This question is no longer open: the turn that asked it was not saved. Send your message again.");
+    this.name = "ToolCallNotFoundError";
+  }
+}
+
+export function isToolCallNotFoundError(e: unknown): e is ToolCallNotFoundError {
+  return e instanceof ToolCallNotFoundError || (e as { code?: unknown } | null)?.code === "tool_call_not_found";
 }
 
 /**

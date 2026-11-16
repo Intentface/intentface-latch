@@ -32,6 +32,7 @@ const KEY = "o1/u1";
 /** Where each id-only method takes its `scope` argument. */
 const SCOPE_AT = {
   appendMessages: 3,
+  replaceMessage: 3,
   updateRun: 3,
   getRun: 1,
   heartbeatRun: 4,

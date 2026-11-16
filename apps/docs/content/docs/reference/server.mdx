@@ -34,7 +34,7 @@ Paths are relative to `basePath`. Every route except the cron route and the conn
 | `GET agents` | The agents the caller can use, for a picker. |
 | `POST agents/:agent/:chatId` | Send a message; streams the answer. Body: `{ message }` or the AI SDK's `{ messages }`. With `queue: true`, a message sent while an answer is running is held: `202 { queued: { id } }`, no stream. |
 | `POST agents/:agent/:chatId/approvals` | Approve or deny paused tools; streams the rest of the answer. |
-| `POST agents/:agent/:chatId/tool-result` | Answer a tool the browser handles, such as a question for the user. |
+| `POST agents/:agent/:chatId/tool-result` | Answer a tool the browser handles, such as a question for the user. An empty `200` when the call was already answered; `409 tool_call_not_found` when the chat holds no such call. |
 | `GET chats` | The caller's chats. |
 | `GET chats/:chatId` | One chat's messages. |
 | `GET chats/:chatId/poll?cursor=…` | Whether an answer is running, the messages waiting, and the history when it differs from `cursor`. For a page with no stream open. |

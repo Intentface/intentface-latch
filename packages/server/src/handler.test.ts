@@ -490,6 +490,21 @@ describe("the queue and poll routes", () => {
     expect(r.handleChat.mock.calls[1]![0].ifBusy).toBe("queue");
   });
 
+  it("answers 409 when a tool result is for a call the chat doesn't hold", async () => {
+    const applyToolResult = vi.fn(async () => {
+      throw Object.assign(new Error("gone"), { code: "tool_call_not_found" });
+    });
+    const handler = createLatchHandler<P>({
+      runtime: { applyToolResult } as never,
+      connections: { oauth: () => undefined, status: async () => [], testTools: async () => [] } as never,
+      basePath: "/api/latch",
+      resolvePrincipal: () => principal,
+    });
+    const res = await handler(new Request("https://app.example/api/latch/agents/a/chat_1/tool-result", send({ toolCallId: "c2", output: "yes" })));
+    expect(res?.status).toBe(409);
+    expect((await res!.json()).code).toBe("tool_call_not_found");
+  });
+
   it("answers 429 when too many messages are waiting", async () => {
     const r = routes();
     r.handleChat.mockRejectedValueOnce(Object.assign(new Error("full"), { code: "queue_full" }));
