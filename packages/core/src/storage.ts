@@ -402,6 +402,18 @@ export interface StorageAdapter<P> {
     fence?: RunFence,
     scope?: OwnerScope<P>,
   ): Promise<void | boolean>;
+  /**
+   * Replace a stored message ONLY IF its parts still read as `expected`'s: a
+   * compare-and-swap, checked in the same statement as the write. Resolves
+   * false, having written nothing, when they differ (or the message is gone).
+   *
+   * The runtime uses it where two requests can each change the same message
+   * without a run between them: one step asked two questions, and both answers
+   * arrive together. With a plain `appendMessages` each saves its own copy and
+   * the later one drops the earlier answer. Optional: without it the runtime
+   * falls back to `appendMessages`, and that race stays open.
+   */
+  replaceMessage?(chatId: string, expected: AppMessage, message: AppMessage, scope?: OwnerScope<P>): Promise<boolean>;
 
   // runs (per-turn execution record)
   /** T1 / non-durable: an unleased run. Stores the identity blob for resume. */

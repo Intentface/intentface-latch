@@ -58,6 +58,7 @@ import {
 } from "./limits.js";
 import {
   encodeOwnerKey,
+  ChatBusyError,
   isChatBusyError,
   isOwnerKeyMismatchError,
   refileTarget,
@@ -3674,6 +3675,11 @@ export function createRuntime<P, RC = unknown>(
       takeQueuedInputs: (chatId: string, runId: string, fence?: RunFence) => storage.takeQueuedInputs!(chatId, runId, scope, fence),
       returnQueuedInputs: (chatId: string, runId: string) => storage.returnQueuedInputs!(chatId, runId, scope),
       finishQueuedInputs: (chatId: string, runId: string) => storage.finishQueuedInputs!(chatId, runId, scope),
+      /** Undefined when the adapter has no compare-and-swap (the caller appends instead). */
+      replaceMessage: storage.replaceMessage
+        ? (chatId: string, expected: AppMessage, message: AppMessage) =>
+            storage.replaceMessage!(chatId, expected, message, scope)
+        : undefined,
     };
   };
 
@@ -4402,27 +4408,44 @@ export function createRuntime<P, RC = unknown>(
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
 
-    const stored = await storage.loadMessages(principal, chatId);
-    const messages = withoutHiddenTail(stored);
-    const changed = recordToolResult(messages, toolCallId, output);
-    if (changed.length === 0) {
-      // Already answered, or asked turns ago and buried since: nothing to
-      // resume. A duplicate submit (double-tapped button, redelivered webhook)
-      // is a no-op instead of a spurious extra turn.
-      const known = stored.some((m) => ((m.parts ?? []) as ResultPart[]).some((p) => p.toolCallId === toolCallId));
-      if (known) return new Response(null, { status: 200 });
-      // Never stored: the client was shown a question from a turn that failed
-      // to save. Its answer would go nowhere, so say so.
-      throw new ToolCallNotFoundError(chatId, toolCallId);
-    }
+    const owned = ownedBy(chat.owner);
+    let messages: AppMessage[] = [];
+    let changed: AppMessage[] = [];
+    for (let attempt = 0; ; attempt++) {
+      const stored = await storage.loadMessages(principal, chatId);
+      messages = withoutHiddenTail(stored);
+      // The message as stored, before this answer is written onto it.
+      const tail = tailOf(messages);
+      const before = owned.replaceMessage && tail ? { ...tail, parts: structuredClone(tail.parts) } : undefined;
+      changed = recordToolResult(messages, toolCallId, output);
+      if (changed.length === 0) {
+        // Already answered, or asked turns ago and buried since: nothing to
+        // resume. A duplicate submit (double-tapped button, redelivered webhook)
+        // is a no-op instead of a spurious extra turn.
+        const known = stored.some((m) => ((m.parts ?? []) as ResultPart[]).some((p) => p.toolCallId === toolCallId));
+        if (known) return new Response(null, { status: 200 });
+        // Never stored: the client was shown a question from a turn that failed
+        // to save. Its answer would go nowhere, so say so.
+        throw new ToolCallNotFoundError(chatId, toolCallId);
+      }
 
-    // Another client tool call in the SAME step may still be awaiting a result;
-    // re-running now would throw MissingToolResultsError. Record this one and
-    // wait for the rest. Scope this to the messages we just touched: a call
-    // abandoned turns ago is still `input-available` in stored history, and
-    // counting it would park every future resume in this chat forever.
-    if (hasPendingToolResult(changed)) {
-      await ownedBy(chat.owner).appendMessages(chatId, changed);
+      // Another client tool call in the SAME step may still be awaiting a result;
+      // re-running now would throw MissingToolResultsError. Record this one and
+      // wait for the rest. Scope this to the messages we just touched: a call
+      // abandoned turns ago is still `input-available` in stored history, and
+      // counting it would park every future resume in this chat forever.
+      if (!hasPendingToolResult(changed)) break;
+      // No run guards this write, so two answers sent together would each save
+      // their own copy of the message and the later one would drop the earlier
+      // answer: both wait, and the turn never resumes. Save only onto the
+      // message as it was read. When another answer got there first, look
+      // again: this one may now be the last, and resume the turn.
+      if (!owned.replaceMessage || !before) {
+        await owned.appendMessages(chatId, changed);
+      } else if (!(await owned.replaceMessage(chatId, before, changed[0]!))) {
+        if (attempt < 20) continue;
+        throw new ChatBusyError(chatId, 1000);
+      }
       return new Response(null, { status: 200 });
     }
 

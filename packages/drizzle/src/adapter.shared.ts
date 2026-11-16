@@ -730,6 +730,22 @@ export function makeStorageAdapter<P>(
     },
 
     /**
+     * Compare-and-swap in one statement: the stored parts are part of the
+     * WHERE, so of two writers that read the same message only one lands.
+     */
+    async replaceMessage(chatId, expected, message, scope) {
+      await checkOwner("chat", chatId, scope);
+      const rows: any[] = await db
+        .update(s.messages)
+        .set({ parts: message.parts, metadata: message.metadata ?? null })
+        .where(and(eq(s.messages.chatId, chatId), eq(s.messages.id, expected.id), eq(s.messages.parts, expected.parts)))
+        .returning({ id: s.messages.id });
+      if (rows.length === 0) return false;
+      await db.update(s.chats).set({ updatedAt: Date.now() }).where(eq(s.chats.id, chatId));
+      return true;
+    },
+
+    /**
      * Run + first message in ONE transaction: a busy chat persists nothing, and
      * a crash can't leave a run without its message. The busy placeholder from
      * `insertRun` rolls the transaction back; the real refusal (with the live
