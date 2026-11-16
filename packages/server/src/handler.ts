@@ -266,6 +266,7 @@ function toUserMessage(body: Record<string, unknown>): AppMessage {
  *   pending_approval  409  a decision is outstanding — resolve it first
  *   chat_busy         409  a turn is live in this chat — retry after `Retry-After`
  *   chat_conflict     409  the client-chosen chat id exists and isn't yours
+ *   tool_call_not_found 409  the answered tool call isn't in the chat (its turn was never saved)
  *   queue_full        429  the chat already holds as many waiting messages as it may
  *   limit_exceeded    429  a budget is spent — retry after `Retry-After`
  *   invalid_message   400  the message isn't a new user message (text and files)
@@ -295,6 +296,8 @@ function refusalResponse(e: unknown): Response | undefined {
       return json({ error: message("chat id is not available"), code }, 409);
     case "limit_exceeded":
       return withRetry({ error: message("limit exceeded"), code }, 429);
+    case "tool_call_not_found":
+      return json({ error: message("this question is no longer open"), code }, 409);
     case "queue_full":
       return json({ error: message("too many messages are waiting in this chat"), code }, 429);
     case "invalid_message":

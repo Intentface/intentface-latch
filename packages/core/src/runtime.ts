@@ -63,6 +63,7 @@ import {
   refileTarget,
   UnsupportedOperationError,
   QueueFullError,
+  ToolCallNotFoundError,
   type QueuedInput,
   type ChatRecord,
   type PurgeOptions,
@@ -1900,6 +1901,30 @@ function recordToolResult(
   return touched ? [last] : [];
 }
 
+/**
+ * A tool's output as it can be stored. Returned as it is when it can be
+ * cloned; otherwise reduced to its JSON form (functions and the like are
+ * dropped, as storage would drop them). Throws when it has no JSON form
+ * (a cycle, a BigInt).
+ */
+function storableOutput(tool: string, value: unknown): unknown {
+  if (value === undefined) return value;
+  // Storage keeps JSON: a cycle or a BigInt has no such form.
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value);
+  } catch (e) {
+    throw new Error(`Tool "${tool}" returned a value that can't be stored: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (json === undefined) throw new Error(`Tool "${tool}" returned a value that can't be stored (${typeof value}).`);
+  try {
+    structuredClone(value);
+    return value;
+  } catch {
+    return JSON.parse(json) as unknown;
+  }
+}
+
 /** Run a hook fire-and-forget — a thrown/rejected hook is swallowed so
  * telemetry never breaks a turn. */
 function fireAndForget(fn: (() => void | Promise<void>) | undefined): void {
@@ -2600,6 +2625,28 @@ export function createRuntime<P, RC = unknown>(
           }
         }
       }
+    }
+
+    // What a tool returns is stored, and cloned by the AI SDK when a turn
+    // continues its message. A value that can't be (it holds a function, say)
+    // would fail the whole step after the client has seen it. So such a value
+    // is reduced to what storage keeps anyway (JSON), and when even that is
+    // impossible the failure is that tool's own error, which the model reads.
+    for (const [name, t] of Object.entries(tools)) {
+      const run = (t as { execute?: unknown } | undefined)?.execute;
+      if (typeof run !== "function") continue;
+      (tools as Record<string, unknown>)[name] = {
+        ...(t as object),
+        execute: (input: unknown, options: unknown) => {
+          const out = run.call(t, input, options) as unknown;
+          if (out && typeof (out as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+            return (async function* () {
+              for await (const part of out as AsyncIterable<unknown>) yield storableOutput(name, part);
+            })();
+          }
+          return Promise.resolve(out).then((value) => storableOutput(name, value));
+        },
+      };
     }
 
     // Merge the default approval policies — harness-tool gates and the
@@ -3395,7 +3442,22 @@ export function createRuntime<P, RC = unknown>(
         if (applied) {
           // Fenced too: the run row and the message are separate writes, and
           // the lease can be lost between them.
-          await owned.appendMessages(resolvedChatId, messages, fence);
+          try {
+            await owned.appendMessages(resolvedChatId, messages, fence);
+          } catch (e) {
+            // The answer was streamed and could not be saved. The run must not
+            // say `completed` over a message that isn't there: it is errored,
+            // and the throw ends the client's stream as a failure.
+            const why = `the answer could not be saved: ${e instanceof Error ? e.message : String(e)}`;
+            console.error(`[run ${run.id}] ${why}`);
+            await owned
+              .updateRun(run.id, { status: "errored", error: why, endedAt: Date.now() }, lease)
+              .catch((e2) => console.error(`[run ${run.id}] couldn't mark the run errored:`, e2));
+            await settleLimits(admitted, { tokens: inputTokens + outputTokens, cost });
+            await reportRunFinished("errored", messages, why);
+            await agentEnd(why);
+            throw e;
+          }
           await storage.recordUsage(principal, {
             runId: run.id,
             model: modelId,
@@ -4340,12 +4402,19 @@ export function createRuntime<P, RC = unknown>(
     const chat = await storage.getChat(principal, chatId);
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
 
-    const messages = withoutHiddenTail(await storage.loadMessages(principal, chatId));
+    const stored = await storage.loadMessages(principal, chatId);
+    const messages = withoutHiddenTail(stored);
     const changed = recordToolResult(messages, toolCallId, output);
-    // Unknown or already-answered call: nothing to resume. Makes a duplicate
-    // submit (double-tapped button, redelivered webhook) a no-op instead of a
-    // spurious extra turn.
-    if (changed.length === 0) return new Response(null, { status: 200 });
+    if (changed.length === 0) {
+      // Already answered, or asked turns ago and buried since: nothing to
+      // resume. A duplicate submit (double-tapped button, redelivered webhook)
+      // is a no-op instead of a spurious extra turn.
+      const known = stored.some((m) => ((m.parts ?? []) as ResultPart[]).some((p) => p.toolCallId === toolCallId));
+      if (known) return new Response(null, { status: 200 });
+      // Never stored: the client was shown a question from a turn that failed
+      // to save. Its answer would go nowhere, so say so.
+      throw new ToolCallNotFoundError(chatId, toolCallId);
+    }
 
     // Another client tool call in the SAME step may still be awaiting a result;
     // re-running now would throw MissingToolResultsError. Record this one and

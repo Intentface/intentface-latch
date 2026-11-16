@@ -813,6 +813,27 @@ export function isQueueFullError(e: unknown): e is QueueFullError {
 }
 
 /**
+ * Thrown by `applyToolResult` when the chat holds no tool call with that id:
+ * the step that asked was never saved (its turn failed after streaming), or
+ * the id is wrong. Nothing was stored and no turn ran. The server answers
+ * `409`. A call that was already answered is not this: that is a no-op.
+ */
+export class ToolCallNotFoundError extends Error {
+  readonly code = "tool_call_not_found";
+  constructor(
+    readonly chatId: string,
+    readonly toolCallId: string,
+  ) {
+    super("This question is no longer open: the turn that asked it was not saved. Send your message again.");
+    this.name = "ToolCallNotFoundError";
+  }
+}
+
+export function isToolCallNotFoundError(e: unknown): e is ToolCallNotFoundError {
+  return e instanceof ToolCallNotFoundError || (e as { code?: unknown } | null)?.code === "tool_call_not_found";
+}
+
+/**
  * Thrown when the runtime is asked for something the storage adapter (or
  * another store) doesn't implement, such as `deleteChat` or `purgeOwner`.
  * Nothing was changed. The server answers `501`.

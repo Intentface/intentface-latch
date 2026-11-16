@@ -15,6 +15,7 @@ The runtime refuses in a small number of typed ways. Each carries a stable `code
 | `409` | `pending_approval` | `PendingApprovalError` | A decision is outstanding on this chat. | Render the approval; resolve it first. |
 | `409` | `chat_busy` | `ChatBusyError` | A turn is already running in this chat — two tabs, a retry racing a reply, a brief landing mid-conversation. Nothing was persisted. | Wait `Retry-After` (also `retryAfterMs` in the body), resend the same message. Or send it with `queue: true` to have it [held and answered next](../guides/queue.md). |
 | `429` | `queue_full` | `QueueFullError` | The message was sent with `queue: true` and the chat already holds as many waiting inputs as it may (`inputQueue.max`, 20 by default). Nothing was stored. | Send it again after the chat has answered. |
+| `409` | `tool_call_not_found` | `ToolCallNotFoundError` | An answer was posted to `tool-result` for a tool call the chat doesn't hold: the turn that asked was streamed but could not be saved. Nothing was stored and no turn ran. (An answer to a call that was already answered is a no-op `200`.) | Show an error and let the user send their message again. |
 | `409` | `chat_conflict` | `ChatConflictError` | The client-chosen chat id exists and isn't the caller's. | Pick another id. |
 | `429` | `limit_exceeded` | `LimitExceededError` | A turn, token or cost budget is spent. `retryAfterMs` is when the window turns over. | Wait `Retry-After`; tell the user which budget (`message`). |
 
